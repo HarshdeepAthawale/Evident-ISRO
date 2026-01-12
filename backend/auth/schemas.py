@@ -84,3 +84,30 @@ class PasswordResetConfirmRequest(BaseModel):
 class MessageResponse(BaseModel):
     """Generic message response schema."""
     message: str = Field(..., description="Response message")
+
+
+class RoleInfo(BaseModel):
+    """Role information schema."""
+    name: str = Field(..., description="Role name")
+    description: str = Field(..., description="Role description")
+    permissions: dict = Field(default_factory=dict, description="Role permissions")
+    
+    class Config:
+        from_attributes = True
+
+
+class RoleListResponse(BaseModel):
+    """List of roles response schema."""
+    roles: list[RoleInfo] = Field(..., description="List of roles")
+
+
+class AssignRoleRequest(BaseModel):
+    """Assign role request schema."""
+    role: str = Field(..., description="Role name to assign")
+
+
+class AssignRoleResponse(BaseModel):
+    """Assign role response schema."""
+    message: str = Field(..., description="Response message")
+    user_id: str = Field(..., description="User ID")
+    new_role: str = Field(..., description="New role assigned")

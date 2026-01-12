@@ -29,10 +29,16 @@ from backend.auth.schemas import (
     PasswordResetRequest,
     PasswordResetConfirmRequest,
     MessageResponse,
-    UserInfo
+    UserInfo,
+    RoleInfo,
+    RoleListResponse,
+    AssignRoleRequest,
+    AssignRoleResponse
 )
 from backend.auth.password_reset import password_reset_store
+from backend.auth.permissions import require_admin
 from backend.models.user import User, UserRole
+from backend.models.role import Role
 from backend.utils.exceptions import AuthenticationError, ValidationError, AuthorizationError
 from backend.utils.logger import StructuredLogger
 
@@ -421,4 +427,135 @@ async def confirm_password_reset(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error during password reset"
+        )
+
+
+# Admin Endpoints
+
+@router.get("/admin/roles", response_model=RoleListResponse, status_code=status.HTTP_200_OK)
+async def list_roles(
+    current_user: User = Depends(get_current_active_user),
+    _: None = Depends(require_admin()),
+    db: Session = Depends(get_db)
+) -> RoleListResponse:
+    """
+    List all available roles (admin-only).
+    """
+    try:
+        roles = db.query(Role).all()
+        
+        role_list = [
+            RoleInfo(
+                name=role.name,
+                description=role.description or "",
+                permissions=role.permissions or {}
+            )
+            for role in roles
+        ]
+        
+        # Also include built-in roles from UserRole enum
+        built_in_roles = [
+            RoleInfo(
+                name=role.value,
+                description=f"Built-in {role.value} role",
+                permissions={}
+            )
+            for role in UserRole
+        ]
+        
+        # Combine and remove duplicates
+        all_roles = {role.name: role for role in role_list}
+        for role in built_in_roles:
+            if role.name not in all_roles:
+                all_roles[role.name] = role
+        
+        logger.info(
+            f"Roles listed by admin: {current_user.username}",
+            extra={
+                "user_id": str(current_user.id),
+                "event": "roles_listed"
+            }
+        )
+        
+        return RoleListResponse(roles=list(all_roles.values()))
+        
+    except Exception as e:
+        logger.error(f"List roles error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while listing roles"
+        )
+
+
+@router.post("/admin/users/{user_id}/role", response_model=AssignRoleResponse, status_code=status.HTTP_200_OK)
+async def assign_role(
+    user_id: str,
+    request: AssignRoleRequest,
+    current_user: User = Depends(get_current_active_user),
+    _: None = Depends(require_admin()),
+    db: Session = Depends(get_db)
+) -> AssignRoleResponse:
+    """
+    Assign a role to a user (admin-only).
+    """
+    try:
+        # Validate role
+        try:
+            new_role = UserRole(request.role.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid role. Must be one of: {[r.value for r in UserRole]}"
+            )
+        
+        # Find target user
+        try:
+            target_user = db.query(User).filter(User.id == user_id).first()
+        except Exception:
+            target_user = None
+        
+        if target_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}"
+            )
+        
+        # Prevent self-demotion from admin (safety check)
+        if target_user.id == current_user.id and new_role != UserRole.ADMIN:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot remove admin role from yourself"
+            )
+        
+        # Update role
+        old_role = target_user.role
+        target_user.role = new_role
+        db.commit()
+        db.refresh(target_user)
+        
+        logger.info(
+            f"Role assigned by admin: {current_user.username} assigned {new_role.value} to {target_user.username}",
+            extra={
+                "admin_id": str(current_user.id),
+                "target_user_id": str(target_user.id),
+                "old_role": old_role.value,
+                "new_role": new_role.value,
+                "event": "role_assigned"
+            }
+        )
+        
+        return AssignRoleResponse(
+            message=f"Role {new_role.value} assigned successfully",
+            user_id=str(target_user.id),
+            new_role=new_role.value
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Assign role error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while assigning role"
         )
